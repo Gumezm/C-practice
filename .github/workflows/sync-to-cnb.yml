@@ -1,7 +1,13 @@
 name: Sync to CNB
+
 on:
   push:
-    branches: [main]   # 仅主分支推送时同步；若默认分支是 master，请改为 [master]
+    branches: [main]
+  workflow_dispatch: # 允许在 Actions 页面手动重跑，修好令牌后不必再提交
+
+concurrency:
+  group: sync-to-cnb
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -10,15 +16,44 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 必须拉取完整历史，否则推送可能不完整
+          fetch-depth: 0
 
-      - name: Sync to CNB Repository
-        uses: docker://tencentcom/git-sync
+      - name: Push to CNB
         env:
-          PLUGIN_TARGET_URL: "https://cnb.cool/Gumezm/C-practice.git"
-          PLUGIN_AUTH_TYPE: "https"
-          PLUGIN_USERNAME: "cnb"
-          PLUGIN_PASSWORD: ${{ secrets.CNB_TOKEN }} # 与第二步设置的 Secret 名称一致
-          PLUGIN_FORCE: "true"
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: Gumezm/C-practice
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${CNB_TOKEN}"
+          # 去掉粘贴时可能带进来的换行/空格
+          CNB_TOKEN="$(printf '%s' "${CNB_TOKEN}" | tr -d '\r\n[:space:]')"
+          if [ -z "${CNB_TOKEN}" ]; then
+            echo "::error::Secret CNB_TOKEN 为空。请在 Settings → Secrets and variables → Actions 里建一个 Repository secret，名字必须是 CNB_TOKEN。"
+            exit 1
+          fi
+
+          BASE="https://cnb.cool/${CNB_REPO}.git"
+
+          # 通过 credential helper 传令牌，不把令牌拼进 URL：
+          # 令牌里若含 @ : % 等字符，拼进 URL 会被转义坏掉，导致认证失败。
+          git config --global credential.helper '!f() { echo username=cnb; echo "password=${CNB_TOKEN}"; }; f'
+          export CNB_TOKEN
+
+          echo "== 检查仓库可写性 =="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "cnb:${CNB_TOKEN}" \
+            "https://cnb.cool/${CNB_REPO}/info/refs?service=git-receive-pack" || true)
+          echo "receive-pack HTTP ${CODE}"
+
+          echo "== 拉取全部分支与标签 =="
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          git fetch --tags origin || true
+
+          echo "== 推送到 CNB =="
+          if ! git push --force --prune "$BASE" '+refs/remotes/origin/*:refs/heads/*'; then
+            echo "::error::推送被拒绝。HTTP 401/403 表示令牌问题：CNB 公开仓库默认只读，令牌必须在「授权范围」里对该仓库勾选读写权限；也可能是令牌已过期。"
+            exit 1
+          fi
+          git push --force "$BASE" '+refs/tags/*:refs/tags/*' || echo "没有标签需要推送"
+          echo "✅ 已同步到 cnb.cool/${CNB_REPO}"
