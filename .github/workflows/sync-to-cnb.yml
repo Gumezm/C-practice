@@ -47,11 +47,13 @@ jobs:
           echo "receive-pack HTTP ${CODE}"
 
           echo "== 拉取全部分支与标签 =="
-          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          # 只取真实分支，放进独立命名空间，避免 origin/HEAD 这种符号引用被当成分支推到 CNB
+          git fetch --prune origin '+refs/heads/*:refs/remotes/src/*'
           git fetch --tags origin || true
 
           echo "== 推送到 CNB =="
-          if ! git push --force --prune "$BASE" '+refs/remotes/origin/*:refs/heads/*'; then
+          # --prune 会顺带删除 CNB 上本地已不存在的分支
+          if ! git push --force --prune "$BASE" '+refs/remotes/src/*:refs/heads/*'; then
             echo "::error::推送被拒绝。HTTP 401/403 表示令牌问题：CNB 公开仓库默认只读，令牌必须在「授权范围」里对该仓库勾选读写权限；也可能是令牌已过期。"
             exit 1
           fi
